@@ -58,6 +58,12 @@ A comprehensive macOS application designed for guitarists, featuring both a prec
 
 ## Installation
 
+### App Store
+[![Guitar Utility on Mac App Store](./Publishingdetails/3.png)](https://apps.apple.com/us/app/guitar-utility/id6751228342)
+
+Download Guitar Utility directly from the [Mac App Store](https://apps.apple.com/us/app/guitar-utility/id6751228342)
+
+### Development
 1. Clone the repository
 2. Open `Guitar Utility.xcodeproj` in Xcode
 3. Build and run the application
