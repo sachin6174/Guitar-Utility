@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 
+@MainActor
 class TunerViewModel: ObservableObject {
     @Published var currentTuning: GuitarTuning = .standard
     @Published var tuningResult: TuningResult = .silent
@@ -48,12 +49,16 @@ class TunerViewModel: ObservableObject {
     }
     
     func startTuning() {
-        audioEngine.startListening()
+        Task {
+            await audioEngine.startListening()
+        }
         resetStability()
     }
     
     func stopTuning() {
-        audioEngine.stopListening()
+        Task {
+            await audioEngine.stopListening()
+        }
         tuningResult = .silent
         if !manualStringSelection {
             selectedString = nil

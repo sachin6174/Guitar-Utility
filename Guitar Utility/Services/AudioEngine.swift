@@ -71,7 +71,9 @@ class AudioEngine: ObservableObject {
     deinit {
         // Ensure all audio processing completes before cleanup
         audioQueue.sync {
-            stopListening()
+            Task { @MainActor in
+                await stopListening()
+            }
             if let setup = fftSetup {
                 vDSP_destroy_fftsetup(setup)
                 fftSetup = nil
@@ -89,14 +91,14 @@ class AudioEngine: ObservableObject {
         // Don't install tap here - do it when starting
     }
     
-    func startListening() {
+    func startListening() async {
         guard !audioEngine.isRunning else { return }
         
         // For macOS, we need to request permission explicitly first
-        requestMicrophonePermissionAndStart()
+        await requestMicrophonePermissionAndStart()
     }
     
-    private func requestMicrophonePermissionAndStart() {
+    private func requestMicrophonePermissionAndStart() async {
         print("🎤 Requesting microphone permission...")
         
         // First check current permission status
@@ -106,36 +108,37 @@ class AudioEngine: ObservableObject {
         switch currentStatus {
         case .authorized:
             print("✅ Permission already granted")
-            startAudioEngine()
+            await startAudioEngine()
         case .notDetermined:
             print("❓ Permission not determined, requesting...")
-            AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
-                DispatchQueue.main.async {
-                    print("🎯 Permission result: \(granted)")
-                    if granted {
-                        self?.startAudioEngine()
-                    } else {
-                        self?.handlePermissionDenied()
-                    }
+            let granted = await withCheckedContinuation { continuation in
+                AVCaptureDevice.requestAccess(for: .audio) { granted in
+                    continuation.resume(returning: granted)
                 }
+            }
+            print("🎯 Permission result: \(granted)")
+            if granted {
+                await startAudioEngine()
+            } else {
+                await handlePermissionDenied()
             }
         case .denied, .restricted:
             print("❌ Permission denied/restricted")
-            handlePermissionDenied()
+            await handlePermissionDenied()
         @unknown default:
             print("❓ Unknown permission status")
-            handlePermissionDenied()
+            await handlePermissionDenied()
         }
     }
     
-    private func handlePermissionDenied() {
-        DispatchQueue.main.async {
+    private func handlePermissionDenied() async {
+        await MainActor.run {
             self.permissionManager.microphonePermissionStatus = .denied
             self.permissionManager.showingPermissionAlert = true
         }
     }
     
-    private func startAudioEngine() {
+    private func startAudioEngine() async {
         do {
             print("🚀 Starting audio engine...")
             
@@ -180,14 +183,14 @@ class AudioEngine: ObservableObject {
             try audioEngine.start()
             
             // Update listening state on main thread
-            Task { @MainActor in
+            await MainActor.run {
                 self.isListening = true
             }
             
             print("✅ Audio engine started successfully!")
             
             // Update permission status after successful start
-            Task { @MainActor in
+            await MainActor.run {
                 self.permissionManager.microphonePermissionStatus = .granted
             }
             
@@ -199,13 +202,13 @@ class AudioEngine: ObservableObject {
             }
             
             // Clean up on failure
-            cleanupAfterFailure()
-            handlePermissionDenied()
+            await cleanupAfterFailure()
+            await handlePermissionDenied()
         }
     }
     
-    private func cleanupAfterFailure() {
-        Task { @MainActor in
+    private func cleanupAfterFailure() async {
+        await MainActor.run {
             self.isListening = false
         }
         
@@ -220,7 +223,7 @@ class AudioEngine: ObservableObject {
         }
     }
     
-    func stopListening() {
+    func stopListening() async {
         // Stop audio processing first
         if audioEngine.isRunning {
             // Safely remove tap and stop engine
@@ -233,15 +236,15 @@ class AudioEngine: ObservableObject {
         }
         
         // Update state on main thread
-        Task { @MainActor in
+        await MainActor.run {
             self.isListening = false
             self.currentFrequency = 0.0
         }
         
         // Clear history arrays thread-safely
-        audioQueue.async {
-            self._frequencyHistory.removeAll()
-            self._signalStrengthHistory.removeAll()
+        audioQueue.async { [weak self] in
+            self?._frequencyHistory.removeAll()
+            self?._signalStrengthHistory.removeAll()
         }
     }
     
@@ -267,7 +270,7 @@ class AudioEngine: ObservableObject {
         
         guard let processTime = shouldProcess else { return }
         
-        lastProcessTimeLock.withLock { _ in
+        _ = lastProcessTimeLock.withLock { _ in
             processTime
         }
         
@@ -290,15 +293,16 @@ class AudioEngine: ObservableObject {
         let rms = sqrt(samples.map { $0 * $0 }.reduce(0, +) / Float(samples.count))
         
         // Track signal strength history for stability (thread-safe)
-        let averageSignalStrength = audioQueue.sync {
-            _signalStrengthHistory.append(rms)
-            if _signalStrengthHistory.count > signalHistorySize {
-                _signalStrengthHistory.removeFirst()
+        let averageSignalStrength = audioQueue.sync { [weak self] in
+            guard let self = self else { return Float(0) }
+            self._signalStrengthHistory.append(rms)
+            if self._signalStrengthHistory.count > self.signalHistorySize {
+                self._signalStrengthHistory.removeFirst()
             }
             
             // Safe division - ensure array is not empty
-            guard _signalStrengthHistory.count > 0 else { return Float(0) }
-            return _signalStrengthHistory.reduce(0, +) / Float(_signalStrengthHistory.count)
+            guard self._signalStrengthHistory.count > 0 else { return Float(0) }
+            return self._signalStrengthHistory.reduce(0, +) / Float(self._signalStrengthHistory.count)
         }
         guard averageSignalStrength > 0.005 else { // Reduced from 0.008 for higher sensitivity
             Task { @MainActor in
@@ -372,28 +376,46 @@ class AudioEngine: ObservableObject {
         var realParts = samples
         var imaginaryParts = [Float](repeating: 0, count: count)
         
-        var splitComplex = DSPSplitComplex(realp: &realParts, imagp: &imaginaryParts)
-        
         // Validate arrays have correct size
         guard realParts.count == count,
               imaginaryParts.count == count else {
             return 0.0
         }
         
-        // Perform forward FFT
-        vDSP_fft_zrip(setup, &splitComplex, 1, log2BufferSize, FFTDirection(kFFTDirection_Forward))
+        // Perform forward FFT with proper memory management
+        let frequency = realParts.withUnsafeMutableBufferPointer { realPtr in
+            imaginaryParts.withUnsafeMutableBufferPointer { imagPtr in
+                guard let realBasePtr = realPtr.baseAddress,
+                      let imagBasePtr = imagPtr.baseAddress else {
+                    return 0.0
+                }
+                
+                var splitComplex = DSPSplitComplex(realp: realBasePtr, imagp: imagBasePtr)
+                
+                // Perform forward FFT
+                vDSP_fft_zrip(setup, &splitComplex, 1, log2BufferSize, FFTDirection(kFFTDirection_Forward))
+                
+                // Calculate magnitudes with size validation
+                var magnitudes = [Float](repeating: 0, count: halfCount)
+                guard magnitudes.count == halfCount else { return 0.0 }
+                
+                vDSP_zvmags(&splitComplex, 1, &magnitudes, 1, vDSP_Length(halfCount))
+                
+                return findPeakFrequency(magnitudes: magnitudes, sampleRate: sampleRate, bufferSize: count)
+            }
+        }
         
-        // Calculate magnitudes with size validation
-        var magnitudes = [Float](repeating: 0, count: halfCount)
-        guard magnitudes.count == halfCount else { return 0.0 }
-        
-        vDSP_zvmags(&splitComplex, 1, &magnitudes, 1, vDSP_Length(halfCount))
+        return frequency
+    }
+    
+    private func findPeakFrequency(magnitudes: [Float], sampleRate: Double, bufferSize: Int) -> Double {
+        let halfCount = magnitudes.count
         
         // Use correct guitar frequency range: 50 Hz (A₁) to 175 Hz (E₃ with tolerance)
         let minFreq = 45.0   // Below lowest guitar frequency (A₁: 55.0 Hz)
         let maxFreq = 180.0  // Above highest frequency (E₃: 164.8 Hz)
-        let minIndex = Int(minFreq * Double(count) / sampleRate)
-        let maxIndex = Int(maxFreq * Double(count) / sampleRate)
+        let minIndex = Int(minFreq * Double(bufferSize) / sampleRate)
+        let maxIndex = Int(maxFreq * Double(bufferSize) / sampleRate)
         
         // Safe bounds checking
         guard minIndex >= 0, 
@@ -417,7 +439,7 @@ class AudioEngine: ObservableObject {
         
         // Apply parabolic interpolation for sub-bin accuracy
         let interpolatedIndex = parabolicInterpolation(magnitudes: magnitudes, peakIndex: actualMaxIndex)
-        let frequency = interpolatedIndex * sampleRate / Double(count)
+        let frequency = interpolatedIndex * sampleRate / Double(bufferSize)
         
         // Validate frequency is within guitar's range and is finite
         guard frequency >= 45.0 && frequency <= 180.0 && frequency.isFinite else { return 0.0 }
@@ -454,7 +476,7 @@ class AudioEngine: ObservableObject {
         let fundamentalFreq = Double(fundamentalIndex) * sampleRate / Double(bufferSize)
         
         // Strategy 2: Check for harmonic series to confirm fundamental
-        let confirmedFundamental = confirmFundamentalWithHarmonics(
+        _ = confirmFundamentalWithHarmonics(
             magnitudes: magnitudes,
             candidateFreq: fundamentalFreq,
             sampleRate: sampleRate,

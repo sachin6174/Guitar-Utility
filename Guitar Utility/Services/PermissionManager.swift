@@ -10,6 +10,7 @@ import AppKit
 import SwiftUI
 import Combine
 
+@MainActor
 class PermissionManager: ObservableObject {
     @Published var microphonePermissionStatus: PermissionStatus = .notDetermined
     @Published var showingPermissionAlert = false
@@ -43,7 +44,8 @@ class PermissionManager: ObservableObject {
     
     @objc private func appDidBecomeActive() {
         // Refresh permission status when app becomes active
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
             self.checkMicrophonePermission()
         }
     }
@@ -51,26 +53,26 @@ class PermissionManager: ObservableObject {
     private func startPermissionMonitoring() {
         // Check permission status every 2 seconds to catch manual changes
         permissionCheckTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            self?.checkMicrophonePermission()
+            Task { @MainActor [weak self] in
+                self?.checkMicrophonePermission()
+            }
         }
     }
     
     func checkMicrophonePermission() {
         let status = AVCaptureDevice.authorizationStatus(for: .audio)
         
-        DispatchQueue.main.async {
-            switch status {
-            case .authorized:
-                self.microphonePermissionStatus = .granted
-            case .notDetermined:
-                self.microphonePermissionStatus = .notDetermined
-            case .denied:
-                self.microphonePermissionStatus = .denied
-            case .restricted:
-                self.microphonePermissionStatus = .restricted
-            @unknown default:
-                self.microphonePermissionStatus = .denied
-            }
+        switch status {
+        case .authorized:
+            self.microphonePermissionStatus = .granted
+        case .notDetermined:
+            self.microphonePermissionStatus = .notDetermined
+        case .denied:
+            self.microphonePermissionStatus = .denied
+        case .restricted:
+            self.microphonePermissionStatus = .restricted
+        @unknown default:
+            self.microphonePermissionStatus = .denied
         }
     }
     
@@ -79,7 +81,7 @@ class PermissionManager: ObservableObject {
         
         // Use Apple's recommended approach
         AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
-            DispatchQueue.main.async {
+            Task { @MainActor [weak self] in
                 print("🎯 Permission request result: \(granted)")
                 
                 if granted {
@@ -109,7 +111,7 @@ class PermissionManager: ObservableObject {
             if status == .notDetermined {
                 isAuthorized = await AVCaptureDevice.requestAccess(for: .audio)
                 
-                DispatchQueue.main.async {
+                await MainActor.run {
                     self.microphonePermissionStatus = isAuthorized ? .granted : .denied
                 }
             }
