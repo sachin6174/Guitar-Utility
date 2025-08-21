@@ -12,8 +12,6 @@ A comprehensive macOS application designed for guitarists, featuring both a prec
 - **String-by-string tuning** with color-coded feedback
 - **High accuracy** frequency measurement down to cents
 
-![Guitar Tuner](images/1.png)
-
 ### 🎼 Metronome
 - **Adjustable BPM** from 40 to 240 beats per minute
 - **Multiple time signatures** including 6/8, quarter notes, and more
@@ -22,7 +20,10 @@ A comprehensive macOS application designed for guitarists, featuring both a prec
 - **Subdivision options** for complex rhythm patterns
 - **Professional audio engine** for precise timing
 
-![Metronome](images/2.png)
+### Metronome Screenshots
+| ![Guitar Tuner](./Publishingdetails/1.png) | ![Metronome](./Publishingdetails/2.png) |
+|:------------------------------------------:|:------------------------------------------:|
+| Guitar Tuner Interface | Metronome Interface |
 
 ## Technical Highlights
 
